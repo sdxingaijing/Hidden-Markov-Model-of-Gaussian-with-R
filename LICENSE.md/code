@@ -47,6 +47,9 @@ data$X1 <- factor(data$X1)
 var.names <- paste("VAR",seq(1,ncol(data)-1), sep="")
 names(data) <- c("cluster",var.names)
 
+#Data creation is finished.
+
+#model estimation
 K<-3 #specify the number of clusters
 data0<-as.matrix(data[,-1])
 I<-dim(data0)[1]
