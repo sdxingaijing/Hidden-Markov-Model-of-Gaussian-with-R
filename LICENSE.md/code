@@ -1,0 +1,180 @@
+#HMM
+library(matrixStats)
+library(msm)
+library(MCMCpack)
+library(bayesm)
+set.seed(100)
+#generate mixture model
+num.vars=1  #number of variables
+n=1000       #number of observations
+num.clusters=3 #number of clusters
+seed=NULL
+if(is.null(seed)){
+  set.seed(runif(1,0,100))
+} else {
+  set.seed(seed)
+}
+
+#transition probability matrix
+tpm<-matrix(c(0.6,0.2,0.2, 0.1,0.7,0.2, 0.3,0.2,0.5),byrow = TRUE,nrow = 3,ncol = 3,dimnames = list(c("1","2","3"),c("1","2","3")))
+
+#simulate the state
+sim_state=matrix(0, nrow = n, ncol = 1)
+sim_state[1]= sample(1:3,size = 1)
+for (i in 1:n) {
+  if (i >=2){
+    sim_state[i]=sample(1:3,size=1,prob = tpm[sim_state[i-1],])
+  }
+}
+#create the data based on the state
+data <- data.frame(matrix(NA, nrow=n, ncol=num.vars+1))
+
+mu <- NULL
+for(m in 1:num.vars){
+  mu <- cbind(mu,rnorm(num.clusters, runif(1,-10,10), 10))
+}
+mu=c(-10,0,10)
+mu0=mu
+#mix<-bayesm::rdirichlet(rep(1,num.clusters))
+for (i in 1:n) {
+  #cluster <- sample(1:num.clusters, size = 1,prob=mix)
+  data[i, 1] <- sim_state[i]
+  for(j in 1:num.vars){
+    data[i, j+1] <- rnorm(1, mu[sim_state[i]], 1)
+  }
+}
+data$X1 <- factor(data$X1)
+var.names <- paste("VAR",seq(1,ncol(data)-1), sep="")
+names(data) <- c("cluster",var.names)
+
+K<-3 #specify the number of clusters
+data0<-as.matrix(data[,-1])
+I<-dim(data0)[1]
+J<-dim(data0)[2]
+
+ppi<-matrix(1/K,nrow = K, ncol = K)  #initial value of pi, prior of mixing propotion
+bac_ppi<-matrix(1/K,nrow = K, ncol = K)
+post_prob<-rep(0,K)
+alpha<-10#hyperparameter of dirichlet distribution
+c <- 10 #positive scaling parameter for dirichlet process
+state<-sample(c(1:K),size = I,replace = TRUE)#initial state
+n_state<-rep(0,K)
+
+nburn<-1000 # iterations of burn-in
+smcmc<-1000 # iterations after burn_in
+swst<-rep(0,(nburn+smcmc))
+
+mu=matrix(c(-10,0,10),K,J)            # initial value of beta
+mug=matrix(0,nburn+smcmc,K*J)       # keeping mcmc sample
+
+sigma=matrix(100,K,J)         # initial value of sigma
+#sigmag=matrix(0,smcmc,1)      # keeping mcmc sample  
+sigmai=1/(sigma)  # inverse of sigma ##################################################
+
+
+#prior of mu and sigma
+##  mu ~ N(u0,v0)  
+u0=matrix(0,J,1)      # mean
+v0=diag(J)*1000     # variance
+v0i=solve(v0)
+v0iu0=v0i%*%u0
+
+#  sigma ~ W_m(f0,g0)  @
+f0=J+2
+g0i=diag(1,J)*f0     # scale matrix 
+
+#Log-likelihood of Regression
+llreg=function(y,x,beta,sigma){
+  n=nrow(y)
+  ll=-n/2*log(2*pi*sigma)-t(y-x%*%beta)%*%(y-x%*%beta)/(2*sigma)
+  return(ll)
+}
+
+#Log-likelihood of Regression
+llreg=function(y,x,beta,sigma){
+  n=nrow(y)
+  ll=-n/2*log(2*pi*sigma)-t(y-x%*%beta)%*%(y-x%*%beta)/(2*sigma)
+  return(ll)
+}
+#Log-density of Multivariate-Normal
+lndMvn=function(x,mu,sigma){
+  sigmai=solve(sigma)
+  ll=-log(2*pi)/2-log(det(sigma))/2-(diag((x-mu)%*%sigmai%*%(x-mu)))/2
+  return(ll)
+}
+hist(data$VAR1)
+
+count_freq=function(state,samp){
+  n_dim=length(samp)
+  samp=sort(samp)
+  n_len=length(state)
+  freq_mat=matrix(0,nrow = n_dim,ncol =n_dim,dimnames =list(c(as.character(samp)),
+                                                            c(as.character(samp))) )
+  for (i in 2:n_len) {
+    freq_mat[rownames(freq_mat)==state[i-1],colnames(freq_mat)==state[i]] = freq_mat[rownames(freq_mat)==state[i-1],colnames(freq_mat)==state[i]]+ 1
+  }
+  return(freq_mat)
+}
+for (ite in 1:(nburn+smcmc)) {
+  #step 1 mu and sigma
+  state0<-state
+  for(k in 1:K){
+    n_state[k]<-sum(state==k)
+    state_k<-(data0[state==k,])
+    #mu ~ N(b_k_S,B_k_S)
+    B_k_S<-solve(v0i+n_state[k]*sigmai[[k]]) 
+    #print(B_k_S)
+    b_k_S<-B_k_S%*%(v0iu0+(sigmai[[k]]*n_state[k])%*%(mean(state_k))) #posterior mean of mu
+    #mu[k,]<- b_k_S+chol(B_k_S)%*%rnorm(J,0,1)
+    if(k==1){
+      mu[k,]<- msm::rtnorm(1,mean=b_k_S,sd=chol(B_k_S),lower=-Inf, upper=mu[2,])
+    } 
+    if(k==2){
+      mu[k,]<- msm::rtnorm(1,mean=b_k_S,sd=chol(B_k_S),lower=mu[1,], upper=mu[3,])
+    }
+    if(k==3){
+      mu[k,]<- msm::rtnorm(1,mean=b_k_S,sd=chol(B_k_S),lower=mu[2,], upper=Inf)
+    }
+    #sigma ~ iWishart(c_k_S,C_k_S)
+    c_k_S<-f0+n_state[k]/2
+    resid<-state_k-t(matrix(1,J,n_state[k])*mu[k,])
+    C_k_S<-g0i+t(resid)%*%resid/2
+    sigma[k,]<-diag(MCMCpack::riwish(c_k_S,C_k_S))
+    #print(c(k,n_state[k]))
+  }
+  sigmai=1/(sigma)
+  #step 2 estimation of ppi
+  freq_mat= count_freq(state,unique(state))
+  for (k in 1:K) {
+    ppi[k,]=bayesm::rdirichlet(freq_mat[k,]+alpha/10)
+  }
+  ppi0=colMeans(ppi)
+  
+  #step 3 state assignment
+  for(k in 1:K){
+    post_prob[k]<- ppi0[k]*dnorm(data0[1,],mu[k,],sigma[k,],log = FALSE)
+  }
+  state[1]<-sample(1:K,size = 1,prob = post_prob) 
+  a_alpha=post_prob
+  
+  for(i in 2:(I-1)){
+    for(k in 1:K){
+      #post_prob[k]<- ppi[state[i-1],k]*dnorm(data0[i,],mu[k,],sigma[k,],log = FALSE)*ppi[k,state[i+1]]
+      post_prob[k]<- dnorm(data0[i,],mu[k,],sqrt(sigma[k,]),log = FALSE)
+    }
+    #print(a_alpha)
+    #print(post_prob)
+    #print(a_alpha%*%t(post_prob))
+    #print(ppi)
+    #print(a_alpha%*%t(post_prob)*ppi)
+    post_prob=colSums(a_alpha%*%t(post_prob)*ppi)
+    #print(post_prob)
+    post_prob=post_prob/sum(post_prob)
+    a_alpha=post_prob
+    state[i]<-sample(1:K,size = 1,prob = post_prob) 
+  }
+  swst[ite]<-sum(state!=state0)
+  mug[ite,]<-t(c(t(mu)))
+}
+
+ts.plot(mug)
